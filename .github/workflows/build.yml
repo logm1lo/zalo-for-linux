@@ -150,7 +150,10 @@ jobs:
   release:
     name: Release the AppImages
     needs: build
-    if: needs.build.outputs.build == 'true'
+    # Run whenever every build leg finished green (built or deliberately
+    # skipped). The verification step below decides whether anything needs
+    # publishing, so a half-published release can never happen silently.
+    if: always() && needs.build.result != 'failure' && needs.build.result != 'cancelled'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -165,6 +168,20 @@ jobs:
         pattern: Zalo*
         path: dist
         merge-multiple: true
+
+    - name: Verify release completeness
+      run: |
+        set -euo pipefail
+        count=$(find dist -maxdepth 1 -name '*.AppImage' | wc -l)
+        echo "AppImages staged for release: $count"
+        if [ "$count" -eq 0 ]; then
+          echo "Nothing to publish — every architecture is already built for this version combination."
+          exit 0
+        fi
+        if [ "$count" -lt 2 ]; then
+          echo "::error::Only $count AppImage(s) staged but at least one per architecture (x86_64 + aarch64) is required. Refusing to publish a partial release."
+          exit 1
+        fi
 
     - name: Get current commit hash via Git
       run: echo "COMMIT_HASH=$(git rev-parse --short HEAD)" >> $GITHUB_ENV

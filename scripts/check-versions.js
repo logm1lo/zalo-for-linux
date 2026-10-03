@@ -6,6 +6,12 @@ const logger = require('./utils/logger');
 
 const ZADARK_DIR = path.join(__dirname, '..', 'plugins', 'zadark');
 
+// AppImage architecture suffix this runner produces (must match the asset
+// naming used by build.js: x86_64 or aarch64).
+function getArchSuffix() {
+  return process.arch === 'arm64' ? 'aarch64' : 'x86_64';
+}
+
 async function main() {
   try {
     // Get all required versions
@@ -28,8 +34,10 @@ async function main() {
       const existingCombo = await getExistingCombinations();
       logger.info(`Found ${existingCombo.length} existing combinations in releases`);
 
-      // Check if combination already exists
-      const targetCombo = `${targetZaloVersion}+${targetZaDarkVersion}+${targetCommit}`;
+      // Check if combination already exists — per architecture, so an
+      // aarch64-only release never marks the x86_64 runner as done.
+      const targetArch = getArchSuffix();
+      const targetCombo = `${targetZaloVersion}+${targetZaDarkVersion}+${targetCommit}+${targetArch}`;
       const isExist = existingCombo.includes(targetCombo);
 
       if (isExist) {
@@ -38,7 +46,12 @@ async function main() {
       } else {
         logger.info(`Workflow decision: build (missing ${targetCombo})`);
         process.env.BUILD = 'true';
-        fs.appendFileSync(process.env.GITHUB_OUTPUT, `build=true\n`);
+      }
+
+      // Always publish the decision so the workflow can act on it explicitly
+      // (a skipped leg must be distinguishable from a crashed one).
+      if (process.env.GITHUB_OUTPUT) {
+        fs.appendFileSync(process.env.GITHUB_OUTPUT, `build=${process.env.BUILD}\n`);
       }
     }
 
@@ -48,7 +61,9 @@ async function main() {
     if (process.env.BUILD) logger.dim(`BUILD=${process.env.BUILD}`);
   } catch (error) {
     logger.error('Version check failed:', error.message);
-    process.exit(0); // Don't fail the whole pipeline
+    // Fail loudly: an aborted version check must never green-light a build
+    // job that produces nothing while the release job publishes anyway.
+    process.exit(1);
   }
 }
 
@@ -132,14 +147,19 @@ async function getExistingCombinations() {
           const releases = JSON.parse(data);
           const combinations = new Set();
 
+          const KNOWN_ARCHES = ['x86_64', 'aarch64'];
           releases.forEach(release => {
             release.assets.forEach(asset => {
-              const match = asset.name.match(/^Zalo-([0-9.]+)\+ZaDark-([0-9.]+)-([0-9a-fA-F]{7,})(?:-[A-Za-z0-9_-]+)?\.AppImage$/);
+              const match = asset.name.match(/^Zalo-([0-9.]+)\+ZaDark-([0-9.]+)-([0-9a-fA-F]{7,})(?:-([A-Za-z0-9_-]+))?\.AppImage$/);
               if (match) {
                 const zaloVer = match[1];
                 const zadarkVer = match[2];
                 const commitHash = match[3];
-                combinations.add(`${zaloVer}+${zadarkVer}+${commitHash}`);
+                // Variants (Full/PlainFull) add extra hyphen segments; the
+                // architecture is always the final segment when present.
+                const tail = (match[4] || '').split('-').pop();
+                const arch = KNOWN_ARCHES.includes(tail) ? tail : 'unknown';
+                combinations.add(`${zaloVer}+${zadarkVer}+${commitHash}+${arch}`);
               }
             });
           });
