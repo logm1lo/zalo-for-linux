@@ -36,6 +36,7 @@ if (process.platform === 'linux') {
 // Plugins
 // ---------------------------------------------------------------------------
 
+const zaluxPlugin = require('./plugins/zalux');
 const screenshotPlugin = require('./plugins/screenshot');
 const launcherBadgePlugin = require('./plugins/launcher-badge');
 const userscriptsPlugin = require('./plugins/userscripts');
@@ -246,6 +247,7 @@ app.once('ready', () => {
   }
 
 // Register plugins
+  zaluxPlugin.register({ app, ipcMain, BrowserWindow, appDir });
   launcherBadgePlugin.register({ app, ipcMain });
   screenshotPlugin.register({ ipcMain });
   userscriptsPlugin.register({ app, ipcMain, BrowserWindow });
