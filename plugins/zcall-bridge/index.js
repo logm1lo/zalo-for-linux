@@ -508,11 +508,14 @@ function showAskWindow(failedWine) {
       if (validateWine(chosen, process.env.ZCALL_WINEPREFIX || path.join(os.homedir(), '.config', 'ZaloData', 'zcall-wine'))) {
         finish({ download: false, neverAgain: false, pickedWine: chosen });
       } else {
+        const engineMissing = !findPipebridgePath();
         dialogModule.showMessageBox(win, {
           type: 'error',
           title: 'Zalo — Tính năng gọi điện',
-          message: 'Wine này không dùng được',
-          detail: 'File đã chọn không chạy được ứng dụng 32-bit hoặc không phải wine hợp lệ:\n' + chosen
+          message: engineMissing ? 'Động cơ gọi điện chưa được cài đặt' : 'Wine này không dùng được',
+          detail: engineMissing
+            ? 'Không tìm thấy pipebridge.exe (động cơ gọi điện) — Wine không thể được xác thực. Build lại ứng dụng với mingw đã cài: SETUP=true npm run main'
+            : 'File đã chọn không chạy được ứng dụng 32-bit hoặc không phải wine hợp lệ:\n' + chosen
         });
       }
     };
@@ -626,6 +629,13 @@ async function promptAndInstall(userDataDir, failedWine) {
       timeout: 180000
     });
 
+    if (!findPipebridgePath()) {
+      throw new Error(
+        'Động cơ gọi điện (pipebridge.exe) chưa được build — không thể xác thực Wine.\n\n' +
+        'Cài mingw (Arch: sudo pacman -S mingw-w64-gcc) rồi chạy lại: SETUP=true npm run main'
+      );
+    }
+
     // Verify the freshly downloaded wine actually works on this machine —
     // classic wine builds need 32-bit libraries that some systems do not
     // have.
@@ -698,6 +708,13 @@ function wineCandidates(userDataDir) {
 
 // Blocking discovery, used at launch in "auto" mode.
 function findUsableWineSync(userDataDir, prefix) {
+  // The 32-bit canary (pipebridge.exe) must exist before any wine can be
+  // validated; without it every wine would be misreported as "cannot run
+  // 32-bit apps" when the real problem is a missing call engine.
+  if (!findPipebridgePath()) {
+    console.error('[zcall-bridge] call engine missing (pipebridge.exe not found) — wine cannot be validated');
+    return { wine: null, downloadedWine: null, failedWine: null, engineMissing: true };
+  }
   const { candidates, downloadedWine } = wineCandidates(userDataDir);
   let failedWine = null;
   for (const candidate of candidates) {
@@ -733,6 +750,11 @@ function findUsableWineSync(userDataDir, prefix) {
 // Same discovery without blocking the main process, used in "lazy" mode.
 // onSlow fires once before the first wineboot or uncached validation.
 async function findUsableWineAsync(userDataDir, prefix, onSlow) {
+  // Same guard as findUsableWineSync: no canary, no validation possible.
+  if (!findPipebridgePath()) {
+    console.error('[zcall-bridge] call engine missing (pipebridge.exe not found) — wine cannot be validated');
+    return { wine: null, downloadedWine: null, failedWine: null, engineMissing: true };
+  }
   const { candidates, downloadedWine } = wineCandidates(userDataDir);
   let failedWine = null;
   let slowNotified = false;
@@ -762,10 +784,34 @@ async function findUsableWineAsync(userDataDir, prefix, onSlow) {
   return { wine: null, downloadedWine, failedWine };
 }
 
+// Dialog: the call engine binary is missing from the app package, so wine
+// could not be validated at all. Points at the build step instead of the
+// misleading "install 32-bit libraries" advice.
+function showEngineMissingDialog() {
+  getElectronModules();
+  if (!dialogModule || !BrowserWindowModule) return;
+  const parent = BrowserWindowModule.getFocusedWindow() || BrowserWindowModule.getAllWindows()[0];
+  dialogModule.showMessageBox(parent, {
+    type: 'error',
+    title: 'Zalo — Tính năng gọi điện',
+    message: 'Động cơ gọi điện chưa được cài đặt',
+    detail: 'Không tìm thấy pipebridge.exe (động cơ gọi điện) trong ứng dụng — Wine chưa được kiểm tra và tính năng gọi điện không khả dụng.\n\nCài mingw rồi build lại ứng dụng:\n  Arch: sudo pacman -S mingw-w64-gcc\n  Debian/Ubuntu: sudo apt install gcc-mingw-w64-i686\nSau đó chạy lại: SETUP=true npm run main'
+  }).catch(() => {});
+}
+
 // No usable wine. At launch the user is only asked when they have not
 // declined for good; on a call attempt they asked for it, so always ask.
-function handleNoWine(userDataDir, { downloadedWine, failedWine }, onCall) {
+function handleNoWine(userDataDir, { downloadedWine, failedWine, engineMissing }, onCall) {
   const cfg = readConfig(userDataDir);
+
+  // Missing call engine (pipebridge.exe was not built at package time):
+  // no wine can be validated — surface the real cause instead of the
+  // lib32-hint dialogs.
+  if (engineMissing) {
+    console.error('[zcall-bridge] calls unavailable: call engine missing (pipebridge.exe not built) — rebuild with mingw installed');
+    if (onCall) showEngineMissingDialog();
+    return;
+  }
 
   // Downloaded runtime exists but cannot run (machine lacks 32-bit
   // libraries): re-downloading would loop forever — guide the user
@@ -853,7 +899,9 @@ function notify(body, onClick) {
 // Zalo retries on the next call.
 let preparing = null;
 
-function prepareOnCall(userDataDir, prefix) {
+// `onCall` true when a real call is waiting (dialogs may nag); false at
+// launch time, where declined-permanent setups must stay silent.
+function prepareOnCall(userDataDir, prefix, onCall) {
   if (wineActivated) return Promise.resolve(process.env.ZCALL_WINE);
   if (!preparing) {
     preparing = findUsableWineAsync(userDataDir, prefix, () => {
@@ -864,7 +912,7 @@ function prepareOnCall(userDataDir, prefix) {
         activateWine(found.wine, prefix);
         return found.wine;
       }
-      handleNoWine(userDataDir, found, true);
+      handleNoWine(userDataDir, found, !!onCall);
       throw new Error('no usable wine');
     }, (e) => {
       preparing = null;
@@ -895,7 +943,10 @@ function installGate(mode, userDataDir, live) {
         () => openSetupDialog({ userDataDir }));
       return Promise.reject(new Error('calls disabled'));
     };
-  } else if (mode === 'lazy' || (live && !wineActivated)) {
+  } else if (mode !== 'off' || (live && !wineActivated)) {
+    // auto included: discovery is async now, so the engine start at launch
+    // (call.launch_native_in_startup) must await __zcallPrepare instead of
+    // relying on ZCALL_WINE being set synchronously.
     const prefix = winePrefix(userDataDir);
     global.__zcallPrepare = () => prepareOnCall(userDataDir, prefix);
   } else {
@@ -946,12 +997,13 @@ function launch({ userDataDir }) {
     return false;
   }
 
-  const found = findUsableWineSync(userDataDir, prefix);
-  if (!found.wine) {
-    handleNoWine(userDataDir, found, false);
-    return false;
-  }
-  activateWine(found.wine, prefix);
+  // Non-blocking discovery for every mode (auto included). A cached wine is
+  // activated almost immediately; a cache miss can no longer freeze startup —
+  // validation happens in the background and the engine start awaits
+  // global.__zcallPrepare in the patched main-dist.
+  prepareOnCall(userDataDir, prefix, false).then((wine) => {
+    console.log('[zcall-bridge] wine ready at launch (async):', wine);
+  }).catch(() => { /* handleNoWine already reported */ });
   return true;
 }
 
@@ -1803,4 +1855,5 @@ module.exports = {
   shutdown,
   // internal (testability)
   _installDownloadedWine: installDownloadedWine,
+  _findUsableWineSync: findUsableWineSync,
 };

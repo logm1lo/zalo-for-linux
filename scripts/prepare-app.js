@@ -213,6 +213,9 @@ async function extractAppAsar() {
 
   const { main: patchAutoTheme } = require('./patches/patch-auto-theme');
   await patchAutoTheme();
+
+  const { main: patchSecureCipherLinux } = require('./patches/patch-secure-cipher-linux');
+  await patchSecureCipherLinux();
 }
 
 function commandExists(command) {

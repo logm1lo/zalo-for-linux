@@ -72,6 +72,19 @@ function sevenz(args) {
   execSync(`7z ${args}`, { cwd: TEMP_DIR, stdio: 'pipe' });
 }
 
+// Suggest the right package-manager command for the build machine's distro.
+function installCommandFor(distroPackages) {
+  const has = (cmd) => {
+    try { execSync(`command -v ${cmd}`, { stdio: 'ignore' }); return true; }
+    catch (_) { return false; }
+  };
+  if (has('apt-get')) return `sudo apt install ${distroPackages.apt}`;
+  if (has('pacman')) return `sudo pacman -S --needed ${distroPackages.pacman}`;
+  if (has('dnf')) return `sudo dnf install ${distroPackages.dnf}`;
+  if (has('zypper')) return `sudo zypper install ${distroPackages.zypper}`;
+  return null;
+}
+
 async function main() {
 
   const currentArch = process.arch || os.arch();
@@ -143,9 +156,15 @@ async function main() {
       });
       logger.dim('pipebridge.exe compiled from source');
     } catch (e) {
+      const cmd = installCommandFor({
+        apt: 'gcc-mingw-w64-i686',
+        pacman: 'mingw-w64-gcc',
+        dnf: 'mingw32-gcc',
+        zypper: 'mingw32-gcc'
+      });
       throw new Error(
-        'mingw (i686-w64-mingw32-gcc) is required to build pipebridge.exe — ' +
-        'install it with: sudo apt install gcc-mingw-w64-i686'
+        'mingw (i686-w64-mingw32-gcc) is required to build pipebridge.exe' +
+        (cmd ? ` — install it with: ${cmd}` : ' — install your distro\'s i686 mingw-w64 cross-compiler')
       );
     }
   }
@@ -177,11 +196,16 @@ async function main() {
       });
       logger.dim('streamproxy.so (32-bit) compiled from source');
     } catch (e) {
-      throw new Error(
-        '32-bit build toolchain is required for streamproxy.so — ' +
-        'install with: sudo apt install gcc-multilib libc6-dev-i386 libx11-dev:i386 libxcb1-dev:i386 libxext-dev:i386' +
-        ' (gcc said: ' + String(e.stderr || e.message).trim().slice(-300) + ')'
-      );
+      const cmd = installCommandFor({
+        apt: 'gcc-multilib libc6-dev-i386 libx11-dev:i386 libxcb1-dev:i386 libxext-dev:i386',
+        pacman: 'gcc-multilib lib32-libx11 lib32-libxcb lib32-libxext',
+        dnf: 'glibc-devel.i686 libX11-devel.i686 libxcb-devel.i686 libXext-devel.i686',
+        zypper: 'gcc-32bit libX11-devel-32bit libxcb-devel-32bit libXext-devel-32bit'
+      });
+      const detail = '32-bit build toolchain is required for streamproxy.so' +
+        (cmd ? ` — install with: ${cmd}` : ' — install your distro\'s 32-bit gcc and X11 development libraries') +
+        ' (gcc said: ' + String(e.stderr || e.message).trim().slice(-300) + ')';
+      throw new Error(detail);
     }
   } else {
     logger.warn('streamproxy.c missing — share screen will not work on Wayland');
