@@ -40,6 +40,11 @@ if [[ ! -f "$APPIMAGETOOL" ]]; then
 fi
 
 # Extract the original AppImage
+# NOTE: --appimage-extract MERGES into an existing squashfs-root (verified:
+# stale files survive). A leftover from an interrupted earlier stage2 would
+# poison this artifact (e.g. wine-runtime from a previous Full extract ended
+# up inside a standard variant) — always start from a clean slate.
+rm -rf "$APPDIR" "${DIST_DIR}/appinfo"
 echo "Extracting AppImage..."
 chmod +x "${DIST_DIR}/${OUTNAME}"
 cd "$DIST_DIR"
